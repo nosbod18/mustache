@@ -1,187 +1,221 @@
-import re
+import html
+import textwrap
 
-class MustacheError(Exception):
-    pass
+class Span:
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
 
 
-class Context:
-    def __init__(self, *items):
-        self.stack = list(items)
+class ParseError(SyntaxError):
+    def __init__(self, msg, span, template):
+        line = Span(template.rfind('\n', 0, span.start) + 1, template.find('\n', span.start))
+        row = template.count('\n', 0, span.start) + 1
+        col = span.start - line.start + 4 # 4 leading spaces
 
-    def push(self, data: dict):
-        self.stack.append(data)
+        msg = f'{msg}, line {row}\n    {template[line.start:(line.end if line.end != -1 else len(template))]}\n' + ' ' * col + '^' * (span.end - span.start - 1)
+        super().__init__(msg)
 
-    def pop(self):
-        self.stack.pop()
 
-    def get(self, key: str):
+class Context(list):
+    def get(self, key, default = None):
         if key == '.':
-            return self.stack[-1] if len(self.stack) > 0 else None
+            return self[-1]
 
-        parts = key.split('.')
+        chain = key.split('.')
+        value = None
 
-        for item in reversed(self._stack):
-            result = self._get(item, parts[0])
-            if result is not None:
-                return result
-
-        for part in parts[1:]:
-            result = self._get(result, part)
-            if result is None:
+        for scope in reversed(self):
+            value = self.scoped_get(chain[0], scope, default)
+            if value is not default:
                 break
 
-        return result
-    
-    def _get(context, key):
-        if isinstance(context, dict) and key in context:
-            return context[key]
-        elif type(context).__module__ != __builtins__ and hasattr(context, key):
-            return getattr(context, key)
-        return None
+        for link in chain[1:]:
+            value = self.scoped_get(link, value, default)
+            if not value:
+                break
+
+        return value
+
+    def scoped_get(self, key, scope, default = None):
+        if callable(scope):
+            scope = scope()
+        if isinstance(scope, dict):
+            return scope[key] if key in scope else default
+        if isinstance(scope, list):
+            return scope[int(key)] if key.isdigit() and int(key) < len(scope) else default
+        return getattr(scope, key, default)
 
 
 class Node:
-    def __init__(self, token: str | None = None):
-        self.token = token
-        self.children = []
+    def __init__(self, token, key, tag, template, delims):
+        s = template[key.start:key.end]
 
-    def __str__(self):
-        return self.to_str()
+        self._token = token
+        self._key = Span(key.start + (len(s) - len(s.lstrip())), key.end - (len(s) - len(s.rstrip())))
+        self._tag = tag
+        self._template = template
+        self.delims = delims
 
-    def add(self, child):
-        self.children.append(child)
+        line = Span(template.rfind('\n', 0, token.start) + 1, template.find('\n', token.end) + 1 or len(template))
+        self.before = template[line.start:token.start]
+        self.after = template[token.end:line.end]
+        self.standalone = (not self.before or self.before.isspace()) and (not self.after or self.after.isspace())
+        self.span = line if not isinstance(self, Interpolation) and self.standalone else Span(token.start, token.end) # copy token so changes to self.span don't affect token
 
-    def render(self, context: Context) -> str:
-        return ''.join(child.render(context) for child in self.children)
+    def __repr__(self):
+        return f"{type(self).__name__}('{self.key}')"
 
-    def to_str(self, depth=0):
-        output = ['·  ' * depth + f'{self.__class__.__name__}']
-        output.extend(child.to_str(depth + 1) for child in self.children)
-        return '\n'.join(output)
+    @property
+    def tag(self):
+        return self._template[self._tag]
+
+    @property
+    def key(self):
+        return self._template[self._key.start:self._key.end]
+
+    @property
+    def token(self):
+        return self._template[self._token.start:self._token.end]
+
+    def render(self, ctx, partials):
+        return ''
 
 
 class Literal(Node):
-    def render(self, context: Context) -> str:
+    def __init__(self, token, template):
+        super().__init__(token, token, token.start, template, ['', ''])
+
+    def __repr__(self):
+        token = self.token.replace('\n', r'\n')
+        return f"Literal('{token}')"
+
+    def render(self, ctx, partials):
         return self.token
 
 
-class Variable(Node):
-    def __init__(self, token: str, escaped: bool):
-        super().__init__(token)
-        self.escaped = escaped
-
-    def render(self, context: Context) -> str:
-        value = context.get(self.token)
-
-        if not value:
-            return ''
-        else:
-            value = str(value)
-
-        if self.escaped:
-            return value\
-                .replace('&', '&amp;')\
-                .replace('"', '&quot;')\
-                .replace('<', '&lt;')\
-                .replace('>', '&gt;')
-        else:
-            return value
+class Interpolation(Node):
+    def render(self, ctx, partials):
+        value = ctx.get(self.key)
+        if callable(value):
+            value = render(str(value()), ctx, partials) if value.__name__ == '<lambda>' else value()
+        return html.escape(value) if self.tag not in ('&', '{') and isinstance(value, str) else str(value or '')
 
 
 class Section(Node):
-    def __init__(self, token: str, tag: str):
-        super().__init__(token)
-        self.inverted = (tag == '^')
+    def __init__(self, token, key, tag, template, delims):
+        super().__init__(token, key, tag, template, delims)
+        self.body = parse(template, delims, self.span.end, self.key)
 
-    def render(self, context: Context) -> str:
-        output = []
-        value = context.get(self.token)
+        if len(self.body) == 0 or self.body[-1].tag != '/':
+            raise ParseError(f"Section '{self.tag + self.key}' was not closed", self.span, template)
 
-        if self.inverted:
-            value = not value
+        self.closing = self.body.pop()
+        self.text = template[self.span.end:self.closing.span.start]
+        self.span.end = self.closing.span.end
 
-        if isinstance(value, list):
-            for item in value:
-                output.extend(self.render_scope(context, item))
-        elif isinstance(value, dict):
-            output = self.render_scope(context, value)
-        elif value:
-            output = self.render_scope(context, None)
+    def __repr__(self):
+        return f'{super().__repr__()}: {self.body}'
 
-        return ''.join(output)
-    
-    def render_scope(self, context: Context, scope: dict | None) -> str:
-        context.push(scope)
-        output = [child.render(context) for child in self.children]
-        context.pop()
-        return output
+    def render(self, ctx, partials):
+        value = ctx.get(self.key)
+        if (self.tag == '#' and not value) or (self.tag == '^' and value):
+            return ''
 
+        if self.tag == '^':
+            return render(self.body, ctx, partials, self.delims)
 
-def _advance(template: str, substr: str) -> tuple[str, str]:
-    try:
-        token, template = template.split(substr, 1)
-        return (token, template)
-    except ValueError:
-        return (template, '')
+        if callable(value):
+            if value.__name__ == '<lambda>':
+                return render(str(value(self.text)), ctx, partials, self.delims)
+            return value(self.text, lambda template, data=None: render(template, Context(ctx + [data]) if data else ctx, partials, self.delims))
+
+        if not isinstance(value, list):
+            value = [value]
+
+        return ''.join(render(self.body, Context(ctx + [item]), partials, self.delims) for item in value)
 
 
-def _tokenize(template: str):# -> list[tuple[str, str]]:
-    template = re.sub(r'\s+', ' ', template)
-    template = template.strip()
-
-    TAGS = ['!', '{', '&', '#', '^', '/']
-    tokens = []
-
-    while template:
-        token, template = _advance(template, '{{')
-
-        if token:
-            tokens.append((token, ''))
-            if not template:
-                break
-
-        token, template = _advance(template, '}}')
-        tag = token[0]
-        token = token.strip()
-
-        if tag in TAGS:
-            token = token[1:]
-
-        if tag == '{':
-            if not template:
-                raise MustacheError('Unclosed "{{{"')
-            elif template[0] == '}':
-                template = template[1:]
-                tag = '&'
-
-        tokens.append((token, tag))
-
-    return tokens
+class Partial(Node):
+    def render(self, ctx, partials):
+        value = partials.get(ctx.get(self.key[1:].strip()) if self.key[0] == '*' else self.key)
+        if self.standalone:
+            value = textwrap.indent(value, self.before)
+        return render(value, ctx, partials) if value else ''
 
 
-def parse(template: str) -> Node:
-    ast = [Node()]
-
-    for token, tag in _tokenize(template):
-        scope = ast[-1]
-
-        if not tag:
-            scope.add(Literal(token))
-        elif tag in ['#', '^']:
-            node = Section(token, tag)
-            scope.add(node)
-            ast.append(node)
-        elif tag == '/':
-            ast.pop()
-        else:
-            scope.add(Variable(token, tag != '&'))
-
-    return ast.pop()
+class Delimiter(Node):
+    def __init__(self, token, key, tag, template, delims):
+        super().__init__(token, key, tag, template, delims)
+        self.delims = self.key.split()
+        if len(self.delims) != 2:
+            raise ParseError('Invalid delimiters', token, template)
 
 
-def render(template: str, data):
-    ast = parse(template)
-    return ast.render(Context(data))
+NODES = {'&': Interpolation, '{': Interpolation, '#': Section, '^': Section, '>': Partial, '=': Delimiter, '/': Node, '!': Node}
 
 
-print(render('Hello, {{.}}!', ['world']))
+def next_token(template, delims, index):
+    token = Span(template.find(delims[0], index), len(template))
+    if token.start == -1:
+        return None
+
+    token.end = template.find(delims[1], token.start + len(delims[0])) + len(delims[1])
+    if token.end == -1 + len(delims[1]) or token.end > len(template):
+        raise ParseError(f"'{delims[1]}' was never closed", Span(token.start, len(template)), template)
+
+    key = Span(token.start + len(delims[0]), token.end - len(delims[1]))
+    if key.start > len(template):
+        raise ParseError(f"'{delims[0]}' was never closed", token, template)
+
+    tag = key.start
+    if template[tag] in NODES:
+        key.start += 1
+
+    return token, key, tag
+
+
+def parse(template, delims = ['{{', '}}'], index = 0, current_section_key = None):
+    ast = []
+
+    while index < len(template):
+        token = next_token(template, delims, index)
+        if token is None:
+            if index < len(template):
+                ast.append(Literal(Span(index, len(template)), template))
+            break
+        token, key, tag = token
+
+        if template[tag] == '{' and delims == ['{{', '}}']:
+            if token.end >= len(template) or template[token.end] != '}':
+                raise ParseError("Expected '{'", token, template)
+            token.end += 1
+
+        if template[tag] == '=':
+            key.end -= 1
+            if template[key.end] != '=':
+                raise ParseError("Expected '='", token, template)
+
+        node = NODES.get(template[tag], Interpolation)(token, key, tag, template, delims)
+
+        if node.span.start > index:
+            ast.append(Literal(Span(index, node.span.start), template))
+        ast.append(node)
+
+        if node.tag == '/':
+            if node.key != current_section_key:
+                raise ParseError(f"Section '{node.tag + node.key}' was not opened", token, template)
+            break
+
+        index = node.span.end
+
+        if type(node) is Delimiter:
+            delims = node.delims
+
+    return ast
+
+
+def render(template_or_ast, data = {}, partials = {}, delims = ['{{', '}}']):
+    ast = parse(template_or_ast, delims) if type(template_or_ast) is str else template_or_ast
+    ctx = Context([data]) if type(data) is not Context else data
+    return ''.join(node.render(ctx, partials) for node in ast)

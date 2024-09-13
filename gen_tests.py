@@ -1,27 +1,41 @@
+from mustache import render, ParseError
 import json
-import re
 
-stub = '''
-######## {0} ########
-# {1}
-assert mustache.render('{2}', {3}) == '{4}'
+template = r'''######## {{name}} ########
+# {{&desc}}
+rendered = render('{{&template}}', {{&data}}{{^data}}{}{{/data}}{{#partials}}, {{.}}{{/partials}})
+print('{{name}}...\x1b[32mok\x1b[0m' if rendered == '{{&expected}}' else '{{name}}...\x1b[31mfail\x1b[0m')
+
 '''
 
-names = ['interpolation']
 
-for name in names:
-    with open(f'spec/specs/{name}.json', 'r') as f:
-        tests = json.loads(f.read())['tests']
+output = 'from mustache import render\n\n'
 
-    generated = 'import mustache\n\n'
+for suite in ('comments', 'delimiters', 'interpolation', 'inverted', 'sections', 'partials', '~lambdas', '~dynamic-names'):
+    with open(f'spec/specs/{suite}.json') as f:
+        data = json.loads(f.read())
 
-    for test in tests:
-        generated += stub.format(
-            re.sub(r'\W+', '_', test['name'].lower()),
-            test['desc'],
-            test['template'].strip(),
-            test['data'] if isinstance(test['data'], dict) else [test['data']],
-            test['expected'].strip())
-        
-    with open(f'test.{name}.py', 'w') as f:
-        f.write(generated)
+        try:
+            output += render("\n################################################################################\nprint('\\n\\x1b[1;34m{{suite}}\\x1b[0m:')\n################################################################################\n\n", {'suite': suite})
+        except ParseError as e:
+            print(e.msg)
+
+        for test in data['tests']:
+            test['desc'] = test['desc'].replace('\r', r'\r').replace('\n', r'\n')
+            test['template'] = test['template'].replace('\\', r'\\').replace('\'', r'\'').replace('\r', r'\r').replace('\n', r'\n')
+            test['expected'] = test['expected'].replace('\\', r'\\').replace('\'', r'\'').replace('\r', r'\r').replace('\n', r'\n')
+
+            if isinstance(test['data'], str):
+                string = test['data'].replace('"', r'\"')
+                test['data'] = f'"{string}"'
+
+            if suite == '~lambdas':
+                test['data']['lambda'] = test['data']['lambda']['python']
+
+            try:
+                output += render(template, test)
+            except ParseError as e:
+                print(e.msg)
+
+with open(f'tests.py', 'w') as f:
+    f.write(output)
