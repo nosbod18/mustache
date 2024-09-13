@@ -1,0 +1,22 @@
+import mustache
+
+PASS = '\x1b[32mok\x1b[0m'
+FAIL = '\x1b[31mfail\x1b[0m\n\tExpected: {0}\n\tRendered: {1}'
+
+{{#suites}}
+###############################################################################
+print('\n\x1b[1;34m{{name}}\x1b[0m:')
+
+{{#tests}}
+######## {{name}} ########
+# {{&desc}}
+try:
+    rendered = mustache.render('{{&template}}', {{&data}}{{^data}}{}{{/data}}{{#partials}}, {{.}}{{/partials}})
+    expected = '{{&expected}}'
+    print('{{name}}...' + (PASS if rendered == expected else FAIL.format(expected, rendered)))
+except mustache.ParseError as e:
+    print(f'{{name}}...{FAIL.format(expected, rendered)}')
+
+{{/tests}}
+
+{{/suites}}
