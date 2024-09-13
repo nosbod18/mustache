@@ -97,9 +97,11 @@ class Literal(Node):
 class Interpolation(Node):
     def render(self, ctx, partials):
         value = ctx.get(self.key)
+        if not value and value not in (0, False):
+            return ''
         if callable(value):
             value = render(str(value()), ctx, partials) if value.__name__ == '<lambda>' else value()
-        return html.escape(value) if self.tag not in ('&', '{') and isinstance(value, str) else str(value or '')
+        return html.escape(value) if self.tag not in ('&', '{') and isinstance(value, str) else str(value)
 
 
 class Section(Node):
@@ -162,7 +164,7 @@ def next_token(template, delims, index):
 
     token.end = template.find(delims[1], token.start + len(delims[0])) + len(delims[1])
     if token.end == -1 + len(delims[1]) or token.end > len(template):
-        raise ParseError(f"'{delims[1]}' was never closed", Span(token.start, len(template)), template)
+        raise ParseError(f"'{delims[0]}' was never closed", Span(token.start, len(template)), template)
 
     key = Span(token.start + len(delims[0]), token.end - len(delims[1]))
     if key.start > len(template):
