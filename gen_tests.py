@@ -2,7 +2,7 @@ import mustache
 import json
 import re
 
-with open('stub.mustache') as f:
+with open('tests.mustache') as f:
     template = f.read()
     data = {'suites': []}
 
@@ -23,11 +23,11 @@ with open('stub.mustache') as f:
                 if suite == '~lambdas':
                     test['data']['lambda'] = test['data']['lambda']['python']
 
-    output = mustache.render(template, data)
-    output = re.sub("'lambda( .*)?: (.*)'", r"lambda\1: \2", output) # remove quotes surrounding lambdas
-
     try:
-        with open('tests.py', 'w') as f:
-            f.write(output)
+        output = mustache.render(template, data)
+        output = re.sub("'lambda( .*)?: (.*)'", r"lambda\1: \2", output) # remove quotes surrounding lambdas
     except mustache.ParseError as e:
         print(e.msg)
+
+    with open('tests.py', 'w') as f:
+        f.write(output)

@@ -1,10 +1,18 @@
 # mustache
-Implements all modules required by the spec along with lambdas and dynamic names.
+Implements all modules required by the spec (comments, delimiters, interpolation, sections, inverted, partials) along with lambdas and dynamic names.
 
-Use `mustache.render(template, data, partials)` to render a template or `mustache.parse(template)` to get a list of nodes to render later. See `gen_tests.py` and `tests.mustache` for an example
+## Usage
 
-To see `mustache` work and run the tests:
-```
-$ python gen_test.py
-$ python tests.py
+### Simple Example
+```python
+import mustache
+import json
+
+def render(output_path, template_path, data_path, partials_dict):
+    with open(output_path) as output, open(template_path) as template, open(data_path) as data:
+        template = template.read()
+        data = json.loads(data.read())
+        output.write(mustache.render(template, data, partials_dict))
+
+render('index.html', 'template.mustache', 'data.json', {})
 ```
